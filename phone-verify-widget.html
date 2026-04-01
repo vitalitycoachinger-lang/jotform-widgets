@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="//js.jotform.com/JotFormCustomWidget.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 8px; }
+    .phone-wrapper { position: relative; }
+    .phone-input {
+      width: 100%;
+      padding: 10px 40px 10px 12px;
+      font-size: 15px;
+      border: 1px solid #c3cad5;
+      border-radius: 4px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .phone-input:focus { border-color: #4573e7; }
+    .phone-input.valid { border-color: #28a745; }
+    .phone-input.invalid { border-color: #dc3545; }
+    .status-icon {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 18px;
+      display: none;
+    }
+    .status-msg {
+      font-size: 12px;
+      margin-top: 4px;
+      min-height: 18px;
+    }
+    .status-msg.valid { color: #28a745; }
+    .status-msg.invalid { color: #dc3545; }
+    .status-msg.checking { color: #6c757d; }
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid #ccc;
+      border-top-color: #4573e7;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="phone-wrapper">
+    <input type="tel" id="phoneInput" class="phone-input" placeholder="Ange telefonnummer">
+    <span id="statusIcon" class="status-icon"></span>
+  </div>
+  <div id="statusMsg" class="status-msg"></div>
+
+  <script>
+    var WEBHOOK_URL = 'https://n8n.srv841966.hstgr.cloud/webhook/xverify-phone';
+
+    var phoneInput = document.getElementById('phoneInput');
+    var statusIcon = document.getElementById('statusIcon');
+    var statusMsg  = document.getElementById('statusMsg');
+    var debounceTimer = null;
+    var lastResult = { valid: false, value: '', status: '', line_type: '', carrier: '' };
+
+    JFCustomWidget.subscribe("ready", function(data) {
+      // Restore value if editing a submission
+      if (data.value) {
+        try {
+          var parsed = JSON.parse(data.value);
+          phoneInput.value = parsed.phone || data.value;
+          if (parsed.status === 'valid') {
+            showValid(parsed.line_type, parsed.carrier);
+            lastResult = { valid: true, value: data.value, status: 'valid', line_type: parsed.line_type, carrier: parsed.carrier };
+          }
+        } catch(e) {
+          phoneInput.value = data.value;
+        }
+      }
+
+      JFCustomWidget.subscribe("submit", function() {
+        var phone = phoneInput.value.replace(/[^\d+]/g, '');
+        if (!phone) {
+          JFCustomWidget.sendSubmit({ valid: false, value: '' });
+          return;
+        }
+        JFCustomWidget.sendSubmit({
+          valid: lastResult.valid,
+          value: JSON.stringify({
+            phone: phone,
+            status: lastResult.status || 'unchecked',
+            line_type: lastResult.line_type || '',
+            carrier: lastResult.carrier || ''
+          })
+        });
+      });
+    });
+
+    phoneInput.addEventListener('input', function() {
+      clearTimeout(debounceTimer);
+      var phone = phoneInput.value.replace(/[^\d+]/g, '');
+
+      // Reset state
+      phoneInput.className = 'phone-input';
+      statusIcon.style.display = 'none';
+      statusMsg.innerHTML = '';
+      statusMsg.className = 'status-msg';
+      lastResult = { valid: false, value: '', status: '', line_type: '', carrier: '' };
+
+      JFCustomWidget.sendData({ value: phone });
+
+      // Swedish numbers: 07XXXXXXXX (10 digits) or +467XXXXXXXX (12 chars)
+      var digits = phone.replace(/\D/g, '');
+      if (digits.length < 10) return;
+
+      debounceTimer = setTimeout(function() { verifyPhone(phone); }, 800);
+    });
+
+    function verifyPhone(phone) {
+      statusMsg.innerHTML = '<span class="spinner"></span> Verifierar...';
+      statusMsg.className = 'status-msg checking';
+
+      var url = WEBHOOK_URL + '?phone=' + encodeURIComponent(phone);
+
+      fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.valid === true) {
+            showValid(data.line_type, data.carrier);
+            lastResult = {
+              valid: true,
+              value: phone,
+              status: 'valid',
+              line_type: data.line_type || '',
+              carrier: data.carrier || ''
+            };
+          } else {
+            var errorMsg = '';
+            if (data.errors && data.errors.length > 0) {
+              errorMsg = data.errors[0];
+            }
+            showInvalid(errorMsg);
+            lastResult = {
+              valid: false,
+              value: phone,
+              status: 'invalid',
+              line_type: '',
+              carrier: ''
+            };
+          }
+
+          JFCustomWidget.sendData({
+            value: JSON.stringify({
+              phone: data.phone || phone,
+              status: data.valid ? 'valid' : 'invalid',
+              line_type: data.line_type || '',
+              carrier: data.carrier || ''
+            })
+          });
+
+          resizeFrame();
+        })
+        .catch(function(err) {
+          statusMsg.innerHTML = 'Verifiering ej tillgänglig';
+          statusMsg.className = 'status-msg checking';
+          // Allow submission on API error
+          lastResult = { valid: true, value: phone, status: 'unknown', line_type: '', carrier: '' };
+        });
+    }
+
+    function showValid(lineType, carrier) {
+      phoneInput.className = 'phone-input valid';
+      statusIcon.innerHTML = '✓';
+      statusIcon.style.display = 'inline';
+      statusIcon.style.color = '#28a745';
+      var msg = 'Giltigt telefonnummer';
+      var details = [];
+      if (lineType && lineType !== 'unknown') details.push(lineType);
+      if (carrier) details.push(carrier);
+      if (details.length > 0) msg += ' (' + details.join(' · ') + ')';
+      statusMsg.innerHTML = msg;
+      statusMsg.className = 'status-msg valid';
+      resizeFrame();
+    }
+
+    function showInvalid(errorCode) {
+      phoneInput.className = 'phone-input invalid';
+      statusIcon.innerHTML = '✗';
+      statusIcon.style.display = 'inline';
+      statusIcon.style.color = '#dc3545';
+      var reasons = {
+        'TOO_SHORT': 'Numret är för kort',
+        'TOO_LONG': 'Numret är för långt',
+        'INVALID_COUNTRY_CODE': 'Ogiltig landskod',
+        'NOT_A_NUMBER': 'Inte ett giltigt nummer',
+        'INVALID_LENGTH': 'Ogiltig längd',
+        'INVALID_BUT_POSSIBLE': 'Numret verkar ogiltigt'
+      };
+      statusMsg.innerHTML = reasons[errorCode] || 'Ogiltigt telefonnummer';
+      statusMsg.className = 'status-msg invalid';
+      resizeFrame();
+    }
+
+    function resizeFrame() {
+      JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight + 10 });
+    }
+  </script>
+</body>
+</html>
